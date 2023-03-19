@@ -1,2 +1,5 @@
 .key
+config.json.local
+config.json
+venv/
 *.swp
