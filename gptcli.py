@@ -18,9 +18,6 @@ try:
 except ImportError:
     pass
 
-now = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-log_file = f"chatlog-{now}.md"
-
 class Config:
     sep = Markdown("---")
     baseDir = os.path.dirname(os.path.realpath(__file__))
@@ -61,19 +58,30 @@ class Config:
 
     @property
     def threshold(self):
-        return self.cfg.get("threshold", 3200)
+        return self.cfg.get("threshold", 2000)
+
+    @property
+    def prompt_summarize(self):
+        return self.cfg.get("prompt_summarize", [])
 
 c = Console()
 kConfig = Config()
 
-def query_openai(data: dict):
+def query_openai(data: dict,summarize=False):
     messages = []
-    messages.extend(kConfig.prompt)
+    if summarize:
+        messages.extend(kConfig.prompt_summarize)
+        #messages.extend(kConfig.prompt)
+        temperature=0.5
+    else:
+        messages.extend(kConfig.prompt)
+        temperature=0.7
     messages.extend(data)
     try:
         response = openai.ChatCompletion.create(
             model=kConfig.model,
-            messages=messages
+            messages=messages,
+            temperature=temperature
         )
         content = response["choices"][0]["message"]["content"]
         c.print(Markdown(content), Config.sep)
@@ -84,9 +92,15 @@ def query_openai(data: dict):
         c.print(e)
     return ""
 
-def query_openai_stream(data: dict):
+def query_openai_stream(data: dict,summarize=False):
     messages = []
-    messages.extend(kConfig.prompt)
+    if summarize:
+        temperature=0.5
+        messages.extend(kConfig.prompt_summarize)
+        #messages.extend(kConfig.prompt)
+    else:
+        temperature=0.7
+        messages.extend(kConfig.prompt)
     messages.extend(data)
     md = Markdown("")
     parser = MarkdownIt().enable("strikethrough")
@@ -95,6 +109,7 @@ def query_openai_stream(data: dict):
         response = openai.ChatCompletion.create(
             model=kConfig.model,
             messages=messages,
+            temperature=temperature,
             stream=True)
         with Live(md, auto_refresh=False) as lv:
             for part in response:
@@ -148,8 +163,9 @@ class ChatConsole:
                             help="exit console")
         parser.add_argument("-multiline", action='store_true',
                             help="input multiple lines, end with ctrl-d(Linux/macOS) or ctrl-z(Windows). cancel with ctrl-c")
-        parser.add_argument("-download", action="store_true", help="download chat log as markdown file")
         parser.add_argument("-summarize", action="store_true", help="summarize the conversation")
+        parser.add_argument("-history", action="store_true", help="output conversation history")
+        parser.add_argument("-rollback", action="store_true", help="rollback one conversation pair")
         self.parser = parser
         self.hist = hist
         try:
@@ -188,10 +204,12 @@ class ChatConsole:
             c.print("Session cleared.")
         elif args.multiline:
             return self.read_multiline()
-        elif args.download:
-            self.download_chatlog()
         elif args.summarize:
-            summarize_history()
+            self.summarize_history()
+        elif args.history:
+            self.output_history()
+        elif args.rollback:
+            self.rollback()
         elif args.exit:
             raise EOFError
         else:
@@ -211,32 +229,40 @@ class ChatConsole:
             contents.append(line)
         return "\n".join(contents)
 
-    def download_chatlog(self):
-        filename = f"chatlog-{datetime.datetime.now().strftime('%m%d%y-%H%M%S')}.md"
-        with open(filename, "w") as f:
-            f.write(f"# Chat Log\n\n")
-            for msg in self.hist:
-                if msg['role'] == 'user':
-                    f.write(f"## User:\n\n{msg['content']}\n\n")
-                else:
-                    f.write(f"## Bot:\n\n{msg['content']}\n\n")
-        c.print(f"Chat log saved to [bold green]{filename}[/] in markdown format.")
-
     def summarize_history(self):
-        self.download_chatlog()
-        #user_messages = [m for m in self.hist if m["role"] == "user"]
-        #assistant_messages = [m for m in self.hist if m["role"] == "assistant"]
-        summarize_content = "Please help me summarize the above conversation in English, to reduce the number of words while ensuring the quality of the conversation. If the conversation contains unethical or inappropriate expressions, please summarize them to milder expressions. It is necessary to summarize the conversation from beginning to end in a way that covers all the main points, and it is acceptable to have a few more tokens to do so. Please do not include this sentence in your summary."
-        summarize_messages = self.hist[4:-6] + [{"role": "user", "content": summarize_content}]
+        summarize_content = "Please summarize the above conversation in English"
+        #summarize_content = "Help me summarize the above conversation in English, to reduce the number of words while ensuring the quality of the conversation. You have to summarize them using figurative language well and without any inappropriate and offensive words. Summary should includes all the point the conversations have, so you should use adequate token (around 500) to cover them. Please do not include this sentence in your summary."
+        summarize_messages = self.hist[0:-4] + [{"role": "user", "content": summarize_content}]
         try:
             if kConfig.stream:
-                summary = query_openai_stream(summarize_messages)
+                summary = query_openai_stream(summarize_messages, summarize=True)
+                #summary = query_openai_stream(summarize_messages)
             else:
-                summary = query_openai(summarize_messages)
+                summary = query_openai(summarize_messages, summarize=True)
+                #summary = query_openai(summarize_messages)
         except Exception as e:
             c.print(e)
             return
-        self.hist[4:-6] = [{"role": "assistant", "content": summary}]
+        if summary and summary.find("I'm sorry") != 0 and summary.find("I apologize") != 0 \
+                and summary.find("As an AI language model") == -1 and len(summary) > 20:
+            self.hist[2:-6] = [{"role": "assistant", "content": summary}]
+        else:
+            c.print("no summary")
+            return
+    
+    def output_history(self):
+        for msg in self.hist:
+            if msg['role'] == 'user':
+                c.print(f"## User:\n\n{msg['content']}\n\n")
+            else:
+                c.print(f"## Bot:\n\n{msg['content']}\n\n")
+        c.print(f"## end ##")
+
+    def rollback(self):
+        self.hist.pop()
+        self.hist.pop()
+        c.print(f"## rollback one conversations ##")
+
 
 def main():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -254,7 +280,11 @@ def main():
     c.print(f"Stream mode: {kConfig.stream}")
 
     hist = kConfig.history # just alias
+    raw_hist = []
     chat = ChatConsole(hist=hist)
+    now = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    log_file = f"chatlog-{now}.md"
+
     while True:
         try:
             content = chat.parse_input().strip()
@@ -275,9 +305,15 @@ def main():
             hist.pop()
         elif kConfig.response:
             hist.append({"role": "assistant", "content": answer})
-        if num_tokens_from_messages(hist, kConfig.model) >= kConfig.threshold:
+            raw_hist.append({"role": "user", "content": content})
+            raw_hist.append({"role": "assistant", "content": answer})
+            with open(log_file, "a", encoding='utf-8' ) as f:
+                f.write(f"## User:\n\n{content}\n\n")
+                f.write(f"## Bot:\n\n{answer}\n\n")
+        num_tokens = num_tokens_from_messages(hist, kConfig.model)
+        c.print(f"num of tokens: {num_tokens}")
+        if  num_tokens >= kConfig.threshold:
             chat.summarize_history()
-
 
 if __name__ == '__main__':
     main()
